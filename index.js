@@ -1,61 +1,30 @@
 #!/usr/bin/env node
 // autogit — auto stage→commit→push for agentic engineers
-// Usage:
-//   autogit init                      set up config in current repo
-//   autogit ship -m "message"         stage, scan, gate, commit, push
-//   autogit status                    show current config
-import { execSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { createInterface } from "node:readline";
+//   autogit setup     wire agent hooks globally (once per machine)
+//   autogit on/off    enable/disable auto-push in current repo
+//   autogit ship      stage, scan, commit, push (what the hooks run)
+//   autogit status    show hooks + repo state
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 
 const CONFIG_FILE = ".autogit.json";
-
-const DEFAULT_CONFIG = {
-  mode: "human", // "auto" | "agent" | "human"
-  remote: "origin",
-  branch: "current", // "current" or a fixed branch name
-  secretsScan: true,
-  review: {
-    provider: "openrouter",
-    model: "anthropic/claude-sonnet-4.5",
-    apiKeyEnv: "OPENROUTER_API_KEY"
-  }
-};
+const DEFAULTS = { mode: "auto", remote: "origin", branch: "current", secretsScan: true };
 
 // ---------- helpers ----------
 
-function sh(cmd, opts = {}) {
-  return execSync(cmd, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], ...opts }).trim();
+function git(...args) {
+  const r = spawnSync("git", args, { encoding: "utf8" });
+  return { ok: r.status === 0, out: ((r.stdout || "") + (r.stderr || "")).trim() };
 }
 
-function shSafe(cmd) {
-  try { return { ok: true, out: sh(cmd) }; }
-  catch (e) { return { ok: false, out: (e.stdout || "") + (e.stderr || e.message) }; }
-}
+function die(msg, code = 1) { console.error(`✗ autogit: ${msg}`); process.exit(code); }
+function ok(msg) { console.log(`✓ autogit: ${msg}`); }
 
-function repoRoot() {
-  const r = shSafe("git rev-parse --show-toplevel");
-  if (!r.ok) die("Not inside a git repository.");
-  return r.out;
-}
-
-function loadConfig(root) {
-  const p = path.join(root, CONFIG_FILE);
-  if (!existsSync(p)) die(`No ${CONFIG_FILE} found. Run: autogit init`);
-  return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(p, "utf8")) };
-}
-
-function die(msg, code = 1) {
-  console.error(`✗ autogit: ${msg}`);
-  process.exit(code);
-}
-
-function ok(msg) { console.log(`✓ ${msg}`); }
-
-async function prompt(question) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(res => rl.question(question, a => { rl.close(); res(a.trim().toLowerCase()); }));
+function repoRootOrNull() {
+  const r = git("rev-parse", "--show-toplevel");
+  return r.ok ? r.out : null;
 }
 
 // ---------- secrets scanning ----------
@@ -76,19 +45,17 @@ const SENSITIVE_FILES = [/^\.env(\..+)?$/, /\.pem$/, /\.key$/, /id_rsa/, /creden
 
 function scanSecrets() {
   const findings = [];
-  const staged = shSafe("git diff --cached --name-only").out.split("\n").filter(Boolean);
+  const staged = git("diff", "--cached", "--name-only").out.split("\n").filter(Boolean);
 
   for (const f of staged) {
-    const base = path.basename(f);
-    if (SENSITIVE_FILES.some(re => re.test(base))) {
+    if (SENSITIVE_FILES.some(re => re.test(path.basename(f)))) {
       findings.push({ file: f, issue: "sensitive filename" });
     }
   }
 
   // only scan added lines
-  const diff = shSafe("git diff --cached --unified=0").out;
   let currentFile = "";
-  for (const line of diff.split("\n")) {
+  for (const line of git("diff", "--cached", "--unified=0").out.split("\n")) {
     if (line.startsWith("+++ b/")) { currentFile = line.slice(6); continue; }
     if (!line.startsWith("+") || line.startsWith("+++")) continue;
     for (const { name, re } of SECRET_PATTERNS) {
@@ -98,143 +65,166 @@ function scanSecrets() {
   return findings;
 }
 
-// ---------- agent review (OpenRouter) ----------
+// ---------- setup: wire agent hooks globally ----------
 
-async function agentReview(config, diff, message) {
-  const key = process.env[config.review.apiKeyEnv];
-  if (!key) die(`Agent review mode requires ${config.review.apiKeyEnv} env var.`);
+function setupClaude() {
+  const dir = path.join(homedir(), ".claude");
+  if (!existsSync(dir)) return "not installed — skipped";
+  const file = path.join(dir, "settings.json");
 
-  const truncated = diff.length > 60000 ? diff.slice(0, 60000) + "\n...[diff truncated]" : diff;
+  let settings = {};
+  if (existsSync(file)) {
+    try { settings = JSON.parse(readFileSync(file, "utf8")); }
+    catch { return `could not parse ${file} — skipped, fix it and rerun`; }
+  }
+  if (JSON.stringify(settings).includes("autogit ship")) return "already wired";
 
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model: config.review.model,
-      messages: [{
-        role: "user",
-        content: `You are a strict code reviewer gating an automatic git push.\nCommit message: "${message}"\n\nReview this staged diff. Reject if you see: secrets/credentials, obviously broken code, destructive changes (mass deletions that look unintentional), or changes unrelated to the commit message.\n\nRespond with EXACTLY one line:\nAPPROVE: <short reason>\nor\nREJECT: <short reason>\n\nDiff:\n${truncated}`
-      }],
-      max_tokens: 200
-    })
+  settings.hooks ??= {};
+  settings.hooks.Stop ??= [];
+  // cd to the project dir: hooks don't guarantee the working directory
+  settings.hooks.Stop.push({
+    hooks: [{ type: "command", command: 'cd "${CLAUDE_PROJECT_DIR:-.}" && autogit ship' }]
   });
-
-  if (!res.ok) die(`OpenRouter API error: ${res.status} ${await res.text()}`);
-  const data = await res.json();
-  const verdict = (data.choices?.[0]?.message?.content || "").trim();
-  console.log(`  reviewer (${config.review.model}): ${verdict}`);
-  return verdict.toUpperCase().startsWith("APPROVE");
+  writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+  return `wired (Stop hook in ${file})`;
 }
 
-// ---------- commands ----------
+function setupCodex() {
+  const dir = path.join(homedir(), ".codex");
+  if (!existsSync(dir)) return "not installed — skipped";
+  const file = path.join(dir, "config.toml");
+  const toml = existsSync(file) ? readFileSync(file, "utf8") : "";
 
-async function cmdInit() {
-  const root = repoRoot();
+  if (/^\s*notify\s*=/m.test(toml)) {
+    return toml.includes("autogit")
+      ? "already wired"
+      : `notify already set in ${file} — skipped, point it at "autogit ship" yourself`;
+  }
+  // top-level TOML keys must come before any [section] — prepend
+  writeFileSync(file, `notify = ["autogit", "ship"]\n` + toml);
+  return `wired (notify in ${file})`;
+}
+
+function cmdSetup() {
+  console.log(`Claude Code:  ${setupClaude()}`);
+  console.log(`Codex:        ${setupCodex()}`);
+  console.log(`\nNow opt in the repos you want auto-pushed:\n  cd <repo> && autogit on`);
+}
+
+// ---------- on / off ----------
+
+function cmdOn() {
+  const root = repoRootOrNull();
+  if (!root) die("not inside a git repository.");
   const p = path.join(root, CONFIG_FILE);
-  if (existsSync(p)) die(`${CONFIG_FILE} already exists.`);
-
-  writeFileSync(p, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
-  ok(`Created ${CONFIG_FILE} (mode: human)`);
-  console.log(`
-Next steps:
-  1. Edit ${CONFIG_FILE} — set mode to "auto", "agent", or "human"
-  2. Add this to your CLAUDE.md / AGENTS.md:
-
-     After completing each task, run:
-       autogit ship -m "<concise commit message describing the change>"
-
-  3. For "agent" mode, set ${DEFAULT_CONFIG.review.apiKeyEnv}.`);
+  if (existsSync(p)) { ok("already on."); return; }
+  writeFileSync(p, JSON.stringify({ mode: "auto" }, null, 2) + "\n");
+  ok(`auto-push ON — every agent turn in this repo now ships to git.`);
 }
 
-async function cmdShip(args) {
-  const root = repoRoot();
+function cmdOff() {
+  const root = repoRootOrNull();
+  if (!root) die("not inside a git repository.");
+  const p = path.join(root, CONFIG_FILE);
+  if (!existsSync(p)) { ok("already off."); return; }
+  unlinkSync(p);
+  ok("auto-push OFF.");
+}
+
+// ---------- ship ----------
+
+function autoMessage(stagedFiles) {
+  const names = stagedFiles.map(f => path.basename(f));
+  const head = names.slice(0, 3).join(", ");
+  const rest = names.length > 3 ? ` (+${names.length - 3} more)` : "";
+  return `autogit: update ${head}${rest}`;
+}
+
+function cmdShip(args) {
+  // Codex notify appends a JSON payload (with cwd) as the last argument
+  const last = args[args.length - 1];
+  if (last?.startsWith("{")) {
+    try { const p = JSON.parse(last); if (p.cwd) process.chdir(p.cwd); } catch {}
+  }
+
+  // silent no-op unless we're in a repo that opted in — hooks fire everywhere
+  const root = repoRootOrNull();
+  if (!root) process.exit(0);
+  const cfgPath = path.join(root, CONFIG_FILE);
+  if (!existsSync(cfgPath)) process.exit(0);
   process.chdir(root);
-  const config = loadConfig(root);
+
+  let config;
+  try { config = { ...DEFAULTS, ...JSON.parse(readFileSync(cfgPath, "utf8")) }; }
+  catch { die(`${CONFIG_FILE} is not valid JSON.`); }
+  if (config.mode !== "auto") {
+    console.log(`autogit: mode "${config.mode}" not supported yet — skipping.`);
+    process.exit(0);
+  }
 
   const mIdx = args.indexOf("-m");
   const message = mIdx !== -1 ? args[mIdx + 1] : null;
-  if (!message) die('Missing commit message. Usage: autogit ship -m "message"');
-  const forceSecrets = args.includes("--force-secrets");
 
-  // 1. stage
-  sh("git add -A");
-  const staged = shSafe("git diff --cached --name-only").out;
-  if (!staged) { ok("Nothing to commit."); return; }
-  ok(`Staged ${staged.split("\n").length} file(s)`);
+  git("add", "-A");
+  const staged = git("diff", "--cached", "--name-only").out.split("\n").filter(Boolean);
+  if (!staged.length) process.exit(0); // nothing changed — stay quiet
 
-  // 2. secrets scan
-  if (config.secretsScan && !forceSecrets) {
+  if (config.secretsScan && !args.includes("--force-secrets")) {
     const findings = scanSecrets();
     if (findings.length) {
-      sh("git reset");
-      console.error("✗ Blocked — possible secrets detected:");
+      git("reset");
+      console.error("✗ autogit: blocked — possible secrets in the diff:");
       for (const f of findings) console.error(`    ${f.file}: ${f.issue}`);
-      die("Fix these, or rerun with --force-secrets to override.");
+      die("fix these, or rerun with --force-secrets.");
     }
-    ok("Secrets scan passed");
   }
 
-  // 3. mode gate
-  const diff = shSafe("git diff --cached").out;
-  if (config.mode === "human") {
-    if (!process.stdin.isTTY) {
-      sh("git reset");
-      die("Human review mode requires an interactive terminal. Run autogit ship yourself, or switch mode.", 3);
-    }
-    console.log("\n" + shSafe("git diff --cached --stat").out + "\n");
-    const a = await prompt(`Commit & push "${message}"? [y/N/d=show diff] `);
-    if (a === "d") {
-      console.log(diff);
-      const b = await prompt(`Commit & push? [y/N] `);
-      if (b !== "y") { sh("git reset"); die("Rejected by human.", 2); }
-    } else if (a !== "y") {
-      sh("git reset");
-      die("Rejected by human.", 2);
-    }
-  } else if (config.mode === "agent") {
-    const approved = await agentReview(config, diff, message);
-    if (!approved) { sh("git reset"); die("Rejected by reviewing agent.", 2); }
-  } // mode "auto": no gate
+  const branch = config.branch === "current" ? git("rev-parse", "--abbrev-ref", "HEAD").out : config.branch;
+  if (branch === "HEAD") { git("reset"); die("detached HEAD — won't auto-push."); }
 
-  // 4. commit
-  sh(`git commit -m ${JSON.stringify(message)}`);
-  ok(`Committed: ${message}`);
+  const commit = git("commit", "-m", message || autoMessage(staged));
+  if (!commit.ok) die(`commit failed:\n${commit.out}`);
 
-  // 5. push
-  const branch = config.branch === "current"
-    ? sh("git rev-parse --abbrev-ref HEAD")
-    : config.branch;
-  const push = shSafe(`git push ${config.remote} HEAD:${branch}`);
-  if (!push.ok) die(`Push failed:\n${push.out}`);
-  ok(`Pushed to ${config.remote}/${branch}`);
+  const push = git("push", config.remote, `HEAD:${branch}`);
+  if (!push.ok) die(`push failed (commit kept locally):\n${push.out}`);
+  ok(`shipped ${staged.length} file(s) → ${config.remote}/${branch}`);
 }
 
+// ---------- status ----------
+
 function cmdStatus() {
-  const root = repoRoot();
-  const config = loadConfig(root);
-  console.log(JSON.stringify(config, null, 2));
+  const claudeFile = path.join(homedir(), ".claude", "settings.json");
+  const claudeWired = existsSync(claudeFile) && readFileSync(claudeFile, "utf8").includes("autogit ship");
+  const codexFile = path.join(homedir(), ".codex", "config.toml");
+  const codexWired = existsSync(codexFile) && /^\s*notify\s*=.*autogit/m.test(readFileSync(codexFile, "utf8"));
+  console.log(`hooks:  Claude Code ${claudeWired ? "wired" : "NOT wired"} · Codex ${codexWired ? "wired" : "NOT wired"}`);
+
+  const root = repoRootOrNull();
+  if (!root) { console.log("repo:   not inside a git repository"); return; }
+  const on = existsSync(path.join(root, CONFIG_FILE));
+  console.log(`repo:   ${root}`);
+  console.log(`        auto-push ${on ? "ON" : "OFF — run: autogit on"}`);
 }
 
 // ---------- main ----------
 
 const [cmd, ...args] = process.argv.slice(2);
 switch (cmd) {
-  case "init": await cmdInit(); break;
-  case "ship": await cmdShip(args); break;
+  case "setup": cmdSetup(); break;
+  case "on": cmdOn(); break;
+  case "off": cmdOff(); break;
+  case "ship": cmdShip(args); break;
   case "status": cmdStatus(); break;
   default:
     console.log(`autogit — auto stage→commit→push for agentic engineers
 
-Commands:
-  autogit init                  Set up .autogit.json in this repo
-  autogit ship -m "message"     Stage, scan, gate, commit, push
-  autogit status                Show config
+  autogit setup     Wire up agent hooks: Claude Code + Codex (once per machine)
+  autogit on        Enable auto-push in this repo
+  autogit off       Disable auto-push in this repo
+  autogit ship      Stage, scan, commit, push (hooks run this after every turn)
+  autogit status    Show hooks + repo state
 
-Modes (set in .autogit.json):
-  auto    ship immediately
-  agent   LLM reviews diff via OpenRouter before push
-  human   terminal y/n prompt on diff
-
-Flags:
-  --force-secrets               Override secrets scan block`);
+ship flags:
+  -m "message"      Commit message (auto-generated if omitted)
+  --force-secrets   Override a secrets-scan block`);
 }
