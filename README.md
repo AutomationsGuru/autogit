@@ -4,34 +4,32 @@
 
 Your AI coding agent writes the code. **autogit ships it.**
 
-Every time your agent finishes a turn, autogit stages, commits, and pushes — automatically. Built for agentic engineers who don't write code by hand.
+When your agent finishes a turn, autogit stages, commits, and pushes — automatically.
 
-Works with **Claude Code**, **Codex**, **Cursor**, and **Pi**.
-
-## Install (once per machine)
+## Quick start
 
 ```bash
+# 1. Install (once per machine)
 npm install -g auto-git
 autogit setup
-```
 
-`autogit setup` hooks into your agents — Claude Code's `Stop` hook, Codex's `Stop` hook, Cursor's `stop` hook, and a Pi extension — so autogit runs after every agent turn, in every project.
-
-Cursor support covers local and worktree agents (the Agents Window included); cloud agents don't fire stop hooks yet. Aborted or errored Cursor turns are never shipped.
-
-> **Codex one-time step:** Codex requires you to trust new hooks. After setup, open `codex` and run `/hooks` to approve autogit. (Needs Codex ≥ 0.124.)
-
-> Not on npm yet? From source: `git clone https://github.com/davidondrej/autogit && cd autogit && npm link`
-
-## Turn it on (per repo)
-
-```bash
+# 2. Enable it per repo
+cd your-project
 autogit on
 ```
 
-That's it. From now on: agent finishes → stage → secrets scan → commit → push.
+Done. Every agent turn now ends with: **stage → secrets scan → commit → push.**
 
-Repos where you didn't run `autogit on` are never touched — autogit stays completely silent there.
+> Not on npm yet? From source: `git clone https://github.com/davidondrej/autogit && cd autogit && npm link`
+
+## Supported agents
+
+| Agent | After `autogit setup` |
+| --- | --- |
+| **Claude Code** | works immediately |
+| **Cursor** | works immediately — local + worktree agents (cloud agents don't fire stop hooks yet) |
+| **Pi** | works immediately |
+| **Codex** | one-time approval: open `codex`, run `/hooks`, trust autogit (needs ≥ 0.124) |
 
 ## Commands
 
@@ -39,22 +37,22 @@ Repos where you didn't run `autogit on` are never touched — autogit stays comp
 autogit setup     Wire up agent hooks (once per machine)
 autogit on        Enable auto-push in this repo
 autogit off       Disable auto-push in this repo
-autogit ship      Stage, scan, commit, push (what the hook runs)
+autogit ship      Stage, scan, commit, push (what the hooks run)
 autogit status    Show hooks + repo state
 ```
 
-`autogit ship -m "message"` uses your message; without `-m` it auto-generates one from the changed files.
+`autogit ship -m "message"` uses your message; without `-m` it writes one from the changed files.
 
 ## Safety
 
-- **Opt-in per repo.** Auto-push only happens where you explicitly turned it on.
-- **Secrets scan** on every diff: AWS, OpenAI, Anthropic, GitHub, Slack, Google keys, private key blocks, `.env` files, JWTs. Findings block the push and unstage everything. Override with `--force-secrets`.
-- **Nothing to commit → no-op.** Question-only agent turns don't create noise.
+- **Opt-in per repo** — repos without `autogit on` are never touched.
+- **Secrets scan** — blocks pushes containing API keys, private key blocks, `.env` files, or JWTs, and unstages everything. Override with `--force-secrets`.
+- **No noise** — nothing changed means nothing shipped. Aborted or errored Cursor turns never ship.
 
 ## Roadmap
 
 - **agent mode** — an LLM reviews the diff before push, for more serious repos.
 - **human mode** — terminal y/n prompt on the diff, for production repos.
-- More agents.
+- More agents (Hermes next).
 
 MIT
