@@ -72,28 +72,32 @@ function scanSecrets() {
 
 // ---------- setup: wire agent hooks globally ----------
 
-// Claude settings.json and Codex hooks.json share the same hook shape:
-// { "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": ... } ] } ] } }
-function wireStopHook(file, command) {
+// Shared JSON config merge: parse, skip if already wired, let addEntry mutate, write.
+function wireHook(file, addEntry) {
   let cfg = {};
   if (existsSync(file)) {
     try { cfg = JSON.parse(readFileSync(file, "utf8")); }
     catch { return `could not parse ${file} — skipped, fix it and rerun`; }
   }
   if (JSON.stringify(cfg).includes("autogit ship")) return "already wired";
+  addEntry(cfg);
+  writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+  return null; // success — caller crafts the message
+}
 
+// Claude settings.json and Codex hooks.json share the same hook shape:
+// { "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": ... } ] } ] } }
+function addStopHook(cfg, command) {
   cfg.hooks ??= {};
   cfg.hooks.Stop ??= [];
   cfg.hooks.Stop.push({ hooks: [{ type: "command", command }] });
-  writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
-  return null; // success — caller crafts the message
 }
 
 function setupClaude() {
   if (!existsSync(path.join(homedir(), ".claude"))) return "not installed — skipped";
   const file = path.join(homedir(), ".claude", "settings.json");
   // cd to the project dir: Claude hooks don't guarantee the working directory
-  return wireStopHook(file, 'cd "${CLAUDE_PROJECT_DIR:-.}" && autogit ship')
+  return wireHook(file, cfg => addStopHook(cfg, 'cd "${CLAUDE_PROJECT_DIR:-.}" && autogit ship'))
     ?? `wired (Stop hook in ${file})`;
 }
 
@@ -102,8 +106,21 @@ function setupCodex() {
   // Codex ≥0.124 lifecycle hooks; runs commands in the session cwd.
   // Separate file, so the user's config.toml (incl. legacy notify) stays untouched.
   const file = path.join(homedir(), ".codex", "hooks.json");
-  return wireStopHook(file, "autogit ship")
+  return wireHook(file, cfg => addStopHook(cfg, "autogit ship"))
     ?? `wired (Stop hook in ${file}) — open codex and run /hooks once to trust it`;
+}
+
+function setupCursor() {
+  if (!existsSync(path.join(homedir(), ".cursor"))) return "not installed — skipped";
+  // Cursor stop hooks run from ~/.cursor and pass workspace_roots via stdin JSON.
+  // Local + worktree agents fire it; cloud agents don't support stop hooks yet.
+  const file = path.join(homedir(), ".cursor", "hooks.json");
+  return wireHook(file, cfg => {
+    cfg.version ??= 1;
+    cfg.hooks ??= {};
+    cfg.hooks.stop ??= [];
+    cfg.hooks.stop.push({ command: "autogit ship" });
+  }) ?? `wired (stop hook in ${file})`;
 }
 
 // Pi auto-discovers extensions in ~/.pi/agent/extensions/ — we drop one in.
@@ -138,6 +155,7 @@ function setupPi() {
 function cmdSetup() {
   console.log(`Claude Code:  ${setupClaude()}`);
   console.log(`Codex:        ${setupCodex()}`);
+  console.log(`Cursor:       ${setupCursor()}`);
   console.log(`Pi:           ${setupPi()}`);
   console.log(`\nNow opt in the repos you want auto-pushed:\n  cd <repo> && autogit on`);
 }
@@ -171,12 +189,32 @@ function autoMessage(stagedFiles) {
   return `autogit: update ${head}${rest}`;
 }
 
+// Hooks (Cursor, Claude, Codex) pass a JSON payload on stdin.
+function readStdinPayload() {
+  if (process.stdin.isTTY) return null;
+  try {
+    const raw = readFileSync(0, "utf8").trim();
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
 function cmdShip(args) {
-  // silent no-op unless we're in a repo that opted in — hooks fire everywhere
+  const payload = readStdinPayload();
+  // Cursor reports turn status — never ship aborted or errored turns
+  if (payload?.status && payload.status !== "completed") process.exit(0);
+  // Cursor hooks run from ~/.cursor; the real project dirs come in the payload
+  const roots = payload?.workspace_roots?.length ? payload.workspace_roots : [process.cwd()];
+  for (const dir of roots) shipRepo(dir, args);
+}
+
+function shipRepo(dir, args) {
+  try { process.chdir(dir); } catch { return; }
+
+  // silent no-op unless this is a repo that opted in — hooks fire everywhere
   const root = repoRootOrNull();
-  if (!root) process.exit(0);
+  if (!root) return;
   const cfgPath = path.join(root, CONFIG_FILE);
-  if (!existsSync(cfgPath)) process.exit(0);
+  if (!existsSync(cfgPath)) return;
   process.chdir(root);
 
   let config;
@@ -184,7 +222,7 @@ function cmdShip(args) {
   catch { die(`${CONFIG_FILE} is not valid JSON.`); }
   if (config.mode !== "auto") {
     console.error(`autogit: mode "${config.mode}" not supported yet — skipping.`);
-    process.exit(0);
+    return;
   }
 
   const mIdx = args.indexOf("-m");
@@ -192,7 +230,7 @@ function cmdShip(args) {
 
   git("add", "-A");
   const staged = git("diff", "--cached", "--name-only").out.split("\n").filter(Boolean);
-  if (!staged.length) process.exit(0); // nothing changed — stay quiet
+  if (!staged.length) return; // nothing changed — stay quiet
 
   if (config.secretsScan && !args.includes("--force-secrets")) {
     const findings = scanSecrets();
@@ -222,8 +260,10 @@ function cmdStatus() {
   const claudeWired = existsSync(claudeFile) && readFileSync(claudeFile, "utf8").includes("autogit ship");
   const codexFile = path.join(homedir(), ".codex", "hooks.json");
   const codexWired = existsSync(codexFile) && readFileSync(codexFile, "utf8").includes("autogit ship");
+  const cursorFile = path.join(homedir(), ".cursor", "hooks.json");
+  const cursorWired = existsSync(cursorFile) && readFileSync(cursorFile, "utf8").includes("autogit ship");
   const piWired = existsSync(path.join(homedir(), ".pi", "agent", "extensions", "autogit.ts"));
-  console.log(`hooks:  Claude Code ${claudeWired ? "wired" : "NOT wired"} · Codex ${codexWired ? "wired" : "NOT wired"} · Pi ${piWired ? "wired" : "NOT wired"}`);
+  console.log(`hooks:  Claude Code ${claudeWired ? "wired" : "NOT wired"} · Codex ${codexWired ? "wired" : "NOT wired"} · Cursor ${cursorWired ? "wired" : "NOT wired"} · Pi ${piWired ? "wired" : "NOT wired"}`);
 
   const root = repoRootOrNull();
   if (!root) { console.log("repo:   not inside a git repository"); return; }
@@ -244,7 +284,7 @@ switch (cmd) {
   default:
     console.log(`autogit — auto stage→commit→push for agentic engineers
 
-  autogit setup     Wire up agent hooks: Claude Code + Codex + Pi (once per machine)
+  autogit setup     Wire up agent hooks: Claude Code + Codex + Cursor + Pi (once per machine)
   autogit on        Enable auto-push in this repo
   autogit off       Disable auto-push in this repo
   autogit ship      Stage, scan, commit, push (hooks run this after every turn)

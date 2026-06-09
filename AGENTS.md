@@ -9,7 +9,7 @@
 One mode, two switches:
 
 - **auto mode only.** Ship immediately, no review gate. Review modes come later (see Roadmap).
-- **Install once, globally**: `autogit setup` wires the user's agents' lifecycle hooks — Claude Code `Stop` hook (`~/.claude/settings.json`), Codex `Stop` hook (`~/.codex/hooks.json`, Codex ≥0.124, needs one-time `/hooks` trust), and a Pi extension (`~/.pi/agent/extensions/autogit.ts`, fires on `agent_end`) — so `autogit ship` runs after every agent turn, in every project.
+- **Install once, globally**: `autogit setup` wires the user's agents' lifecycle hooks — Claude Code `Stop` hook (`~/.claude/settings.json`), Codex `Stop` hook (`~/.codex/hooks.json`, Codex ≥0.124, needs one-time `/hooks` trust), Cursor `stop` hook (`~/.cursor/hooks.json`), and a Pi extension (`~/.pi/agent/extensions/autogit.ts`, fires on `agent_end`) — so `autogit ship` runs after every agent turn, in every project.
 - **Opt-in per repo**: `autogit on` writes `.autogit.json`. In repos without it, `ship` is a silent no-op (exit 0). The per-repo switch is the safety model for the MVP: only enable it where aggressive auto-push is OK.
 
 ## How `ship` works
@@ -20,8 +20,10 @@ One mode, two switches:
 
 - Single zero-dependency Node.js CLI: `index.js`, ESM, Node ≥18, npm-distributed.
 - Commands: `setup`, `on`, `off`, `ship`, `status`.
-- Claude `settings.json` and Codex `hooks.json` share the same hook JSON shape — one `wireStopHook()` helper serves both.
-- Codex legacy `notify` is NOT used (single-slot, often taken by other tools, deprecated since hooks landed in 0.124). Hook commands run in the session `cwd`, so `ship` needs no payload parsing.
+- All three JSON configs (Claude `settings.json`, Codex `hooks.json`, Cursor `hooks.json`) merge through one `wireHook()` helper; Claude/Codex share the same `Stop` entry shape, Cursor uses lowercase `stop` + `version: 1`.
+- Codex legacy `notify` is NOT used (single-slot, often taken by other tools, deprecated since hooks landed in 0.124). Codex hook commands run in the session `cwd`.
+- `ship` reads an optional JSON payload from stdin (all hook systems pipe one): Cursor's carries `workspace_roots` (its hooks run from `~/.cursor`, not the project — multi-root workspaces ship every opted-in root) and `status` (`ship` only proceeds on `completed`, so aborted/errored turns never push). Claude/Codex payloads lack these fields and fall through to cwd behavior.
+- Cursor cloud agents don't fire `stop` hooks yet — local + worktree agents only.
 
 ## Fail-safes
 

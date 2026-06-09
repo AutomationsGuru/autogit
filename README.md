@@ -6,7 +6,7 @@ Your AI coding agent writes the code. **autogit ships it.**
 
 Every time your agent finishes a turn, autogit stages, commits, and pushes — automatically. Built for agentic engineers who don't write code by hand.
 
-Works with **Claude Code**, **Codex**, and **Pi**.
+Works with **Claude Code**, **Codex**, **Cursor**, and **Pi**.
 
 ## Install (once per machine)
 
@@ -15,7 +15,9 @@ npm install -g auto-git
 autogit setup
 ```
 
-`autogit setup` hooks into your agents — Claude Code's `Stop` hook, Codex's `Stop` hook, and a Pi extension — so autogit runs after every agent turn, in every project.
+`autogit setup` hooks into your agents — Claude Code's `Stop` hook, Codex's `Stop` hook, Cursor's `stop` hook, and a Pi extension — so autogit runs after every agent turn, in every project.
+
+Cursor support covers local and worktree agents (the Agents Window included); cloud agents don't fire stop hooks yet. Aborted or errored Cursor turns are never shipped.
 
 > **Codex one-time step:** Codex requires you to trust new hooks. After setup, open `codex` and run `/hooks` to approve autogit. (Needs Codex ≥ 0.124.)
 
