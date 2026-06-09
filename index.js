@@ -70,42 +70,38 @@ function scanSecrets() {
 
 // ---------- setup: wire agent hooks globally ----------
 
-function setupClaude() {
-  const dir = path.join(homedir(), ".claude");
-  if (!existsSync(dir)) return "not installed — skipped";
-  const file = path.join(dir, "settings.json");
-
-  let settings = {};
+// Claude settings.json and Codex hooks.json share the same hook shape:
+// { "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": ... } ] } ] } }
+function wireStopHook(file, command) {
+  let cfg = {};
   if (existsSync(file)) {
-    try { settings = JSON.parse(readFileSync(file, "utf8")); }
+    try { cfg = JSON.parse(readFileSync(file, "utf8")); }
     catch { return `could not parse ${file} — skipped, fix it and rerun`; }
   }
-  if (JSON.stringify(settings).includes("autogit ship")) return "already wired";
+  if (JSON.stringify(cfg).includes("autogit ship")) return "already wired";
 
-  settings.hooks ??= {};
-  settings.hooks.Stop ??= [];
-  // cd to the project dir: hooks don't guarantee the working directory
-  settings.hooks.Stop.push({
-    hooks: [{ type: "command", command: 'cd "${CLAUDE_PROJECT_DIR:-.}" && autogit ship' }]
-  });
-  writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
-  return `wired (Stop hook in ${file})`;
+  cfg.hooks ??= {};
+  cfg.hooks.Stop ??= [];
+  cfg.hooks.Stop.push({ hooks: [{ type: "command", command }] });
+  writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+  return null; // success — caller crafts the message
+}
+
+function setupClaude() {
+  if (!existsSync(path.join(homedir(), ".claude"))) return "not installed — skipped";
+  const file = path.join(homedir(), ".claude", "settings.json");
+  // cd to the project dir: Claude hooks don't guarantee the working directory
+  return wireStopHook(file, 'cd "${CLAUDE_PROJECT_DIR:-.}" && autogit ship')
+    ?? `wired (Stop hook in ${file})`;
 }
 
 function setupCodex() {
-  const dir = path.join(homedir(), ".codex");
-  if (!existsSync(dir)) return "not installed — skipped";
-  const file = path.join(dir, "config.toml");
-  const toml = existsSync(file) ? readFileSync(file, "utf8") : "";
-
-  if (/^\s*notify\s*=/m.test(toml)) {
-    return toml.includes("autogit")
-      ? "already wired"
-      : `notify already set in ${file} — skipped, point it at "autogit ship" yourself`;
-  }
-  // top-level TOML keys must come before any [section] — prepend
-  writeFileSync(file, `notify = ["autogit", "ship"]\n` + toml);
-  return `wired (notify in ${file})`;
+  if (!existsSync(path.join(homedir(), ".codex"))) return "not installed — skipped";
+  // Codex ≥0.124 lifecycle hooks; runs commands in the session cwd.
+  // Separate file, so the user's config.toml (incl. legacy notify) stays untouched.
+  const file = path.join(homedir(), ".codex", "hooks.json");
+  return wireStopHook(file, "autogit ship")
+    ?? `wired (Stop hook in ${file}) — open codex and run /hooks once to trust it`;
 }
 
 // Pi auto-discovers extensions in ~/.pi/agent/extensions/ — we drop one in.
@@ -174,12 +170,6 @@ function autoMessage(stagedFiles) {
 }
 
 function cmdShip(args) {
-  // Codex notify appends a JSON payload (with cwd) as the last argument
-  const last = args[args.length - 1];
-  if (last?.startsWith("{")) {
-    try { const p = JSON.parse(last); if (p.cwd) process.chdir(p.cwd); } catch {}
-  }
-
   // silent no-op unless we're in a repo that opted in — hooks fire everywhere
   const root = repoRootOrNull();
   if (!root) process.exit(0);
@@ -228,8 +218,8 @@ function cmdShip(args) {
 function cmdStatus() {
   const claudeFile = path.join(homedir(), ".claude", "settings.json");
   const claudeWired = existsSync(claudeFile) && readFileSync(claudeFile, "utf8").includes("autogit ship");
-  const codexFile = path.join(homedir(), ".codex", "config.toml");
-  const codexWired = existsSync(codexFile) && /^\s*notify\s*=.*autogit/m.test(readFileSync(codexFile, "utf8"));
+  const codexFile = path.join(homedir(), ".codex", "hooks.json");
+  const codexWired = existsSync(codexFile) && readFileSync(codexFile, "utf8").includes("autogit ship");
   const piWired = existsSync(path.join(homedir(), ".pi", "agent", "extensions", "autogit.ts"));
   console.log(`hooks:  Claude Code ${claudeWired ? "wired" : "NOT wired"} · Codex ${codexWired ? "wired" : "NOT wired"} · Pi ${piWired ? "wired" : "NOT wired"}`);
 

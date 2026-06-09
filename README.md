@@ -13,7 +13,9 @@ npm install -g auto-git
 autogit setup
 ```
 
-`autogit setup` hooks into your agents — Claude Code's `Stop` hook, Codex's `notify`, and a Pi extension — so autogit runs after every agent turn, in every project.
+`autogit setup` hooks into your agents — Claude Code's `Stop` hook, Codex's `Stop` hook, and a Pi extension — so autogit runs after every agent turn, in every project.
+
+> **Codex one-time step:** Codex requires you to trust new hooks. After setup, open `codex` and run `/hooks` to approve autogit. (Needs Codex ≥ 0.124.)
 
 > Not on npm yet? From source: `git clone https://github.com/davidondrej/autogit && cd autogit && npm link`
 

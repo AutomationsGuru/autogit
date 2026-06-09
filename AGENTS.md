@@ -9,7 +9,7 @@
 One mode, two switches:
 
 - **auto mode only.** Ship immediately, no review gate. Review modes come later (see Roadmap).
-- **Install once, globally**: `autogit setup` wires the user's agents' lifecycle hooks — Claude Code `Stop` hook (`~/.claude/settings.json`), Codex `notify` (`~/.codex/config.toml`), and a Pi extension (`~/.pi/agent/extensions/autogit.ts`, fires on `agent_end`) — so `autogit ship` runs after every agent turn, in every project.
+- **Install once, globally**: `autogit setup` wires the user's agents' lifecycle hooks — Claude Code `Stop` hook (`~/.claude/settings.json`), Codex `Stop` hook (`~/.codex/hooks.json`, Codex ≥0.124, needs one-time `/hooks` trust), and a Pi extension (`~/.pi/agent/extensions/autogit.ts`, fires on `agent_end`) — so `autogit ship` runs after every agent turn, in every project.
 - **Opt-in per repo**: `autogit on` writes `.autogit.json`. In repos without it, `ship` is a silent no-op (exit 0). The per-repo switch is the safety model for the MVP: only enable it where aggressive auto-push is OK.
 
 ## How `ship` works
@@ -20,7 +20,8 @@ One mode, two switches:
 
 - Single zero-dependency Node.js CLI: `index.js`, ESM, Node ≥18, npm-distributed.
 - Commands: `setup`, `on`, `off`, `ship`, `status`.
-- Codex `notify` passes a JSON payload with `cwd` as the last argument — `ship` detects it and runs in that directory.
+- Claude `settings.json` and Codex `hooks.json` share the same hook JSON shape — one `wireStopHook()` helper serves both.
+- Codex legacy `notify` is NOT used (single-slot, often taken by other tools, deprecated since hooks landed in 0.124). Hook commands run in the session `cwd`, so `ship` needs no payload parsing.
 
 ## Fail-safes
 
