@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Zero-dependency CLI, ESM, Node >=18.
 // autogit — auto stage→commit→push for agentic engineers
 //   autogit setup     wire agent hooks globally (once per machine)
 //   autogit on/off    enable/disable auto-push in current repo
@@ -13,6 +14,7 @@ const CONFIG_FILE = ".autogit.json";
 const DEFAULTS = { mode: "auto", remote: "origin", branch: "current", secretsScan: true };
 
 // ---------- helpers ----------
+// Helpers wrap git/fs calls so commands above stay readable.
 
 function git(...args) {
   const r = spawnSync("git", args, { encoding: "utf8" });
