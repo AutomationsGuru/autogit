@@ -48,6 +48,7 @@ autogit status    Show hooks + repo state
 - **Opt-in per repo** — repos without `autogit on` are never touched.
 - **Secrets scan** — blocks pushes containing API keys, private key blocks, `.env` files, or JWTs, and unstages everything. Override with `--force-secrets`.
 - **No noise** — nothing changed means nothing shipped. Aborted or errored Cursor turns never ship.
+- **Parallel-agent aware** — if another agent is still mid-task in the same repo, autogit waits its turn: the last agent to finish ships everything. (For fully separate commits per agent, use worktrees — autogit handles each independently.)
 
 ## Roadmap
 
