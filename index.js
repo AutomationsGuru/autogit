@@ -12,6 +12,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 const CONFIG_FILE = ".autogit.json";
+// Version comes from package.json — single source of truth.
+const VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 // Defaults mirror the MVP's current auto-push behavior.
 const DEFAULTS = { mode: "auto", remote: "origin", branch: "current", secretsScan: true };
 // Trailer added to every commit body — this is how `undo` knows a commit is ours.
@@ -485,6 +487,7 @@ function cmdUndo() {
 // ---------- status ----------
 
 function cmdStatus() {
+  console.log(`autogit ${VERSION}`);
   const claudeFile = path.join(homedir(), ".claude", "settings.json");
   const claudeWired = existsSync(claudeFile) && readFileSync(claudeFile, "utf8").includes("autogit ship");
   const codexFile = path.join(homedir(), ".codex", "hooks.json");
@@ -518,6 +521,7 @@ switch (cmd) {
   case "undo": cmdUndo(); break;
   case "busy": cmdBusy(args); break;
   case "status": cmdStatus(); break;
+  case "-v": case "--version": console.log(VERSION); break;
   default:
     console.log(`autogit — auto stage→commit→push for agentic engineers
 
@@ -528,6 +532,7 @@ switch (cmd) {
   autogit undo      Take back the last autogit commit, local + remote (repeatable)
   autogit busy      Mark this repo busy (agent start/tool hooks run this)
   autogit status    Show hooks + repo state
+  autogit --version Print the installed version (-v)
 
 ship flags:
   -m "message"      Commit message (defaults to the turn's prompt, else the file list)
