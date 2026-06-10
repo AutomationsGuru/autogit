@@ -10,7 +10,7 @@ When your agent finishes a turn, autogit stages, commits, and pushes — automat
 
 ```bash
 # 1. Install (once per machine)
-npm install -g auto-git
+npm install -g @davidondrej/autogit
 autogit setup
 
 # 2. Enable it per repo

@@ -38,7 +38,7 @@ One mode, two switches:
 - **human mode** — terminal y/n prompt on the diff, for production repos. (Existed in the pre-MVP prototype, cut for focus.)
 - More agents (Hermes, …) in `setup`. (Pi added 2026-06-10. Hermes needs `post_llm_call` shell hook in `~/.hermes/config.yaml` + reading `cwd` from stdin JSON in `ship` + user consent flow.)
 - Branch strategy: currently current-branch push only; auto-branch + PR flow considered.
-- ~~Package name~~ — DECIDED 2026-06-10: npm name is **`auto-git`** (checked: free; `autogit` and `autogit-cli` are taken). The installed binary stays `autogit`.
+- ~~Package name~~ — DECIDED 2026-06-10: npm name is **`@davidondrej/autogit`** (unscoped `autogit`/`autogit-cli` taken; `auto-git` rejected by npm's name-similarity rule). The installed binary stays `autogit`. Scoped packages need `npm publish --access=public`.
 
 ## Ground rules
 
