@@ -20,7 +20,7 @@ autogit on
 
 Done. Every agent turn now ends with: **stage → secrets scan → commit → push.**
 
-> Not on npm yet? From source: `git clone https://github.com/davidondrej/autogit && cd autogit && npm link`
+> From source instead: `git clone https://github.com/davidondrej/autogit && cd autogit && npm link`
 
 ## Supported agents
 
