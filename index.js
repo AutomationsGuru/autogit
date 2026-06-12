@@ -571,7 +571,21 @@ function shipRepo(dir, args, id, payload) {
   const commit = git("commit", "-m", subject, "-m", SHIP_TRAILER);
   if (!commit.ok) die(`commit failed:\n${commit.out}`);
 
-  const push = git("push", config.remote, `HEAD:${branch}`);
+  let push = git("push", config.remote, `HEAD:${branch}`);
+  if (!push.ok && /rejected|non-fast-forward|fetch first/i.test(push.out)) {
+    // remote moved (a push from elsewhere) — rebase our commit onto it and
+    // retry once. The tree is clean here (everything was just committed),
+    // so rebase is safe. A conflict aborts cleanly: commit kept locally.
+    if (git("fetch", config.remote, branch).ok) {
+      const rebase = git("rebase", "FETCH_HEAD");
+      if (!rebase.ok) {
+        git("rebase", "--abort");
+        die(`remote ${config.remote}/${branch} has new commits that conflict with yours — commit kept locally.\nresolve manually: git pull --rebase && git push`);
+      }
+      console.error(`autogit: remote moved — rebased onto ${config.remote}/${branch}, retrying push.`);
+      push = git("push", config.remote, `HEAD:${branch}`);
+    }
+  }
   if (!push.ok) die(`push failed (commit kept locally):\n${push.out}`);
   ok(`shipped ${staged.length} file(s) → ${config.remote}/${branch}`);
 }
