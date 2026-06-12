@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, readdirSync, statSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline/promises";
 
 const CONFIG_FILE = ".autogit.json";
 // Version comes from package.json — single source of truth.
@@ -208,13 +209,52 @@ function cmdSetup() {
   console.log(`\nNow opt in the repos you want auto-pushed:\n  cd <repo> && autogit on`);
 }
 
+// ---------- public-repo guard ----------
+// `on` warns before enabling auto-push on a public GitHub repo: prompts become
+// public commit subjects, and pushed mistakes are scraped within seconds.
+// Best-effort and GitHub-only — offline or non-GitHub remotes enable silently.
+
+function githubSlug(url) {
+  // https://github.com/o/r(.git) · git@github.com:o/r(.git) · ssh://git@github.com/o/r
+  const m = url.match(/[/@]github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+async function isPublicOnGitHub(slug) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${slug}`, {
+      headers: { "User-Agent": "autogit" }, // GitHub rejects UA-less requests
+      signal: AbortSignal.timeout(3000)
+    });
+    return res.status === 200; // anonymous 200 = public; 404 = private; else unknown
+  } catch { return false; }
+}
+
+async function confirmPublic(slug) {
+  console.error(`⚠ autogit: this repo is PUBLIC on GitHub (${slug}).`);
+  console.error("  Auto-push makes your prompts public commit messages, visible to anyone.");
+  // no terminal to ask on (an agent ran this) — refuse, with the override spelled out
+  if (!process.stdin.isTTY) die("run `autogit on --public-ok` to enable anyway.");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  let a = "";
+  try { a = (await rl.question("  Enable anyway? [y/N] ")).trim().toLowerCase(); }
+  catch {} // Ctrl+C / Ctrl+D at the prompt counts as No
+  finally { rl.close(); }
+  if (a !== "y" && a !== "yes") die("aborted — auto-push stays off.");
+}
+
 // ---------- on / off ----------
 
-function cmdOn() {
+async function cmdOn(args) {
   const root = repoRootOrNull();
   if (!root) die("not inside a git repository.");
   const p = path.join(root, CONFIG_FILE);
   if (existsSync(p)) { ok("already on."); return; }
+  if (!args.includes("--public-ok")) {
+    const remote = git("remote", "get-url", "origin");
+    const slug = remote.ok ? githubSlug(remote.out) : null;
+    if (slug && await isPublicOnGitHub(slug)) await confirmPublic(slug);
+  }
   writeFileSync(p, JSON.stringify({ mode: "auto" }, null, 2) + "\n");
   ok(`auto-push ON — every agent turn in this repo now ships to git.`);
 }
@@ -528,7 +568,7 @@ function cmdStatus() {
 const [cmd, ...args] = process.argv.slice(2);
 switch (cmd) {
   case "setup": cmdSetup(); break;
-  case "on": cmdOn(); break;
+  case "on": await cmdOn(args); break;
   case "off": cmdOff(); break;
   case "ship": cmdShip(args); break;
   case "undo": cmdUndo(); break;
@@ -546,6 +586,9 @@ switch (cmd) {
   autogit busy      Mark this repo busy (agent start/tool hooks run this)
   autogit status    Show hooks + repo state
   autogit --version Print the installed version (-v)
+
+on flags:
+  --public-ok       Enable without the public-GitHub-repo confirmation
 
 ship flags:
   -m "message"      Commit message (defaults to the turn's prompt, else the file list)

@@ -52,6 +52,7 @@ autogit --version Print the installed version (-v)
 ## Safety
 
 - **Opt-in per repo** — repos without `autogit on` are never touched.
+- **Public-repo check** — `autogit on` warns when the repo is public on GitHub (your prompts become public commit messages). Humans confirm with y/N; agents must re-run with `autogit on --public-ok`.
 - **One-command undo** — `autogit undo` takes back the last auto-push, remote included.
 - **Secrets scan** — blocks pushes containing API keys, private key blocks, `.env` files, or JWTs, and unstages everything. Override with `--force-secrets`. Commit messages are covered too: a prompt containing a secret never becomes the subject (not overridable).
 - **No noise** — nothing changed means nothing shipped. Aborted or errored Cursor turns never ship.
@@ -68,6 +69,7 @@ For contributors, human or AI. The implementation is a reference of product inte
 - One mode for now (DECIDED 2026-06-10): **auto** — ship immediately, no review gate. Review modes are on the roadmap.
 - npm name (DECIDED 2026-06-10): **`@davidondrej/autogit`** — unscoped `autogit`/`autogit-cli` taken; `auto-git` rejected by npm's name-similarity rule. The installed binary stays `autogit`. Scoped packages need `npm publish --access=public`.
 - Per-repo opt-in is the safety model: `autogit on` writes `.autogit.json`; without it, `ship` is a silent no-op (exit 0). Only enable it where aggressive auto-push is OK.
+- Public-repo guard in `on` (added 2026-06-12): parses the `origin` URL for a `github.com` slug, probes `https://api.github.com/repos/<slug>` anonymously (3 s timeout, explicit User-Agent — GitHub rejects UA-less requests). HTTP 200 = public → TTY asks y/N (Ctrl+C/D = No), non-TTY (an agent) dies pointing at `--public-ok`. 404/offline/non-GitHub remotes enable silently — best-effort guard, never a gate. `--public-ok` skips the probe entirely. Runs only at `on`; the ship path is untouched.
 - `autogit setup` wires lifecycle hooks globally: Claude Code `Stop` (`~/.claude/settings.json`), Codex `Stop` (`~/.codex/hooks.json`, ≥0.124, one-time `/hooks` trust), Cursor `stop` (`~/.cursor/hooks.json`, lowercase events + `version: 1`), and a Pi extension (`~/.pi/agent/extensions/autogit.ts`, fires on `agent_end`). All JSON configs merge through one helper; Claude/Codex share the same `Stop` entry shape.
 - Codex legacy `notify` is NOT used (single-slot, often taken by other tools; an upstream deprecation was attempted and reverted in 0.129). Codex hook commands run in the session `cwd`, unsandboxed, via `$SHELL -lc` — so `git push` has network and the user's PATH.
 - Codex surfaces (verified 2026-06-10): the desktop app and IDE extension run the same CLI core and execute the same `~/.codex/hooks.json`; cloud tasks never fire local hooks, and `codex exec` hook dispatch is broken upstream (openai/codex#26452). Trust is hash-based — any change to the wired commands silently un-trusts them until the user re-runs `/hooks`; editing hooks.json mid-session disables hooks until Codex restarts (#21160). Esc-interrupted turns fire no `Stop`; that turn's changes ship with the next one (busy-marker TTL self-heals).
