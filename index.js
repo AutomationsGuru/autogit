@@ -243,18 +243,111 @@ async function confirmPublic(slug) {
   if (a !== "y" && a !== "yes") die("aborted — auto-push stays off.");
 }
 
+// ---------- GitHub account pinning ----------
+// gh supports multiple logged-in accounts, but its credential helper only ever
+// serves the *active* one — pushes to the other account's repos 403. Fix at
+// `on` time: when gh knows 2+ accounts, ask which one this repo pushes as and
+// pin it repo-locally:
+//   credential.username → routes osxkeychain / Git-Credential-Manager
+//   credential.helper   → appended fallback serving that user's gh token
+// Detection reads gh's hosts.yml directly — `gh auth status` hits the network
+// (seconds); the file read is instant and works even if gh moved off PATH.
+
+function ghHostsFile() {
+  const base = process.env.GH_CONFIG_DIR
+    || (process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "gh")
+                                    : path.join(homedir(), ".config", "gh"));
+  return path.join(base, "hosts.yml");
+}
+
+// Tiny purpose-built parse of gh's own file: the github.com block, the keys
+// under `users:`, and the active `user:` value. Tolerant of indent width.
+function ghAccounts() {
+  let text;
+  try { text = readFileSync(ghHostsFile(), "utf8"); } catch { return []; }
+  const names = []; let active = null;
+  let inGithub = false, usersIndent = -1, childIndent = -1;
+  for (const raw of text.split("\n")) {
+    if (!raw.trim() || raw.trim().startsWith("#")) continue;
+    const indent = raw.length - raw.trimStart().length;
+    const line = raw.trim();
+    if (indent === 0) { inGithub = line === "github.com:"; usersIndent = childIndent = -1; continue; }
+    if (!inGithub) continue;
+    if (usersIndent !== -1 && indent <= usersIndent) { usersIndent = childIndent = -1; } // left the users block
+    if (usersIndent === -1) {
+      if (line === "users:") { usersIndent = indent; continue; }
+      const m = line.match(/^user:\s*(\S+)/);
+      if (m) active = m[1];
+      continue;
+    }
+    if (childIndent === -1) childIndent = indent; // first child sets the level
+    if (indent === childIndent) {
+      const m = line.match(/^([\w-]+):/);
+      if (m) names.push(m[1]);
+    }
+  }
+  return names.map(name => ({ name, active: name === active }));
+}
+
+function pinAccount(name, knownToGh) {
+  if (!/^[\w-]+$/.test(name)) die(`"${name}" doesn't look like a GitHub username.`);
+  git("config", "credential.username", name); // keychain/GCM route by this
+  if (knownToGh) {
+    // last-resort helper: if no earlier helper serves this username, hand git
+    // that user's gh token. Appended repo-locally; re-pinning replaces it.
+    git("config", "--unset-all", "credential.helper", "gh auth token");
+    git("config", "--add", "credential.helper",
+      `!f() { [ "$1" = get ] && t=$(gh auth token --user ${name} 2>/dev/null) && [ -n "$t" ] && echo "password=$t"; :; }; f`);
+  }
+  ok(`this repo now pushes as ${name}.`);
+}
+
+async function chooseAccount(args) {
+  const i = args.indexOf("--account");
+  const flag = i !== -1 ? args[i + 1] : null;
+  const accounts = ghAccounts();
+  if (flag) {
+    const known = accounts.some(a => a.name === flag);
+    if (accounts.length && !known)
+      die(`gh doesn't know "${flag}" — logged in: ${accounts.map(a => a.name).join(", ")}.`);
+    pinAccount(flag, known);
+    return;
+  }
+  if (accounts.length < 2) return; // zero/one account — nothing to disambiguate
+  console.error("autogit: multiple GitHub accounts are logged in:");
+  accounts.forEach((a, n) => console.error(`    ${n + 1}. ${a.name}${a.active ? " (active)" : ""}`));
+  if (!process.stdin.isTTY) die("pick one for this repo: autogit on --account <name>");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  let ans = null;
+  try { ans = (await rl.question(`  Which account pushes this repo? [1-${accounts.length}, Enter = active] `)).trim(); }
+  catch {} // Ctrl+C / Ctrl+D
+  finally { rl.close(); }
+  if (ans === null) die("aborted — auto-push stays off.");
+  const picked = accounts[Number(ans) - 1]
+    || accounts.find(a => a.name === ans)
+    || (ans === "" ? accounts.find(a => a.active) : null);
+  if (!picked) die(`no account "${ans}" — aborted, auto-push stays off.`);
+  pinAccount(picked.name, true);
+}
+
 // ---------- on / off ----------
 
 async function cmdOn(args) {
   const root = repoRootOrNull();
   if (!root) die("not inside a git repository.");
   const p = path.join(root, CONFIG_FILE);
-  if (existsSync(p)) { ok("already on."); return; }
-  if (!args.includes("--public-ok")) {
-    const remote = git("remote", "get-url", "origin");
-    const slug = remote.ok ? githubSlug(remote.out) : null;
-    if (slug && await isPublicOnGitHub(slug)) await confirmPublic(slug);
+  if (existsSync(p)) {
+    // already on — but `--account` re-pins without toggling
+    if (args.includes("--account")) await chooseAccount(args);
+    else ok("already on.");
+    return;
   }
+  const remote = git("remote", "get-url", "origin");
+  const url = remote.ok ? remote.out : "";
+  const slug = githubSlug(url);
+  if (slug && !args.includes("--public-ok") && await isPublicOnGitHub(slug)) await confirmPublic(slug);
+  // account pin only applies to HTTPS github remotes — SSH routes by key
+  if (slug && /^https?:\/\//.test(url)) await chooseAccount(args);
   writeFileSync(p, JSON.stringify({ mode: "auto" }, null, 2) + "\n");
   ok(`auto-push ON — every agent turn in this repo now ships to git.`);
 }
@@ -553,8 +646,9 @@ function cmdStatus() {
   const root = repoRootOrNull();
   if (!root) { console.log("repo:   not inside a git repository"); return; }
   const on = existsSync(path.join(root, CONFIG_FILE));
+  const acct = git("config", "credential.username");
   console.log(`repo:   ${root}`);
-  console.log(`        auto-push ${on ? "ON" : "OFF — run: autogit on"}`);
+  console.log(`        auto-push ${on ? "ON" : "OFF — run: autogit on"}${acct.ok && acct.out ? ` · pushes as ${acct.out}` : ""}`);
 
   const dir = busyDir(root);
   const fresh = existsSync(dir)
@@ -589,6 +683,7 @@ switch (cmd) {
 
 on flags:
   --public-ok       Enable without the public-GitHub-repo confirmation
+  --account <user>  Pin which GitHub account pushes this repo (multi-account gh setups)
 
 ship flags:
   -m "message"      Commit message (defaults to the turn's prompt, else the file list)
