@@ -28,6 +28,7 @@ Done. Every agent turn now ends with: **stage → secrets scan → commit → pu
 | --- | --- |
 | **Claude Code** | works immediately |
 | **Cursor** | works immediately — local + worktree agents (cloud agents don't fire stop hooks yet) |
+| **Hermes** | works immediately — shell hooks in `~/.hermes/config.yaml` |
 | **Pi** | works immediately |
 | **Codex** | one-time approval: restart open sessions, then run `/hooks` in `codex` and trust autogit (needs ≥ 0.124) — covers the CLI, the Codex desktop app, and the IDE extension |
 
@@ -72,10 +73,10 @@ For contributors, human or AI. The implementation is a reference of product inte
 - Per-repo opt-in is the safety model: `autogit on` writes `.autogit.json`; without it, `ship` is a silent no-op (exit 0). Only enable it where aggressive auto-push is OK.
 - Public-repo guard in `on` (added 2026-06-12): parses the `origin` URL for a `github.com` slug, probes `https://api.github.com/repos/<slug>` anonymously (3 s timeout, explicit User-Agent — GitHub rejects UA-less requests). HTTP 200 = public → TTY asks y/N (Ctrl+C/D = No), non-TTY (an agent) dies pointing at `--public-ok`. 404/offline/non-GitHub remotes enable silently — best-effort guard, never a gate. `--public-ok` skips the probe entirely. Runs only at `on`; the ship path is untouched.
 - Multi-account pin in `on` (added 2026-06-12): gh's credential helper only ever serves its *active* account (cli/cli#11938), so auto-pushes to a second account's repos 403. Detection reads gh's `hosts.yml` directly (instant — `gh auth status` hits the network for seconds). 2+ accounts on an HTTPS github.com remote → TTY asks which account (number, name, or Enter = active), non-TTY dies pointing at `--account <name>`. The pin is repo-local git config: `credential.username` (osxkeychain/GCM route by it) plus an appended last-resort `credential.helper` that serves `gh auth token --user <name>`. SSH remotes skip the question (keys route those). Re-pin anytime with `autogit on --account <name>` (works while already on); `status` shows the pin; `off` leaves it in place — it fixes manual pushes too.
-- `autogit setup` wires lifecycle hooks globally: Claude Code `Stop` (`~/.claude/settings.json`), Codex `Stop` (`~/.codex/hooks.json`, ≥0.124, one-time `/hooks` trust), Cursor `stop` (`~/.cursor/hooks.json`, lowercase events + `version: 1`), and a Pi extension (`~/.pi/agent/extensions/autogit.ts`, fires on `agent_end`). All JSON configs merge through one helper; Claude/Codex share the same `Stop` entry shape.
+- `autogit setup` wires lifecycle hooks globally: Claude Code `Stop` (`~/.claude/settings.json`), Codex `Stop` (`~/.codex/hooks.json`, ≥0.124, one-time `/hooks` trust), Cursor `stop` (`~/.cursor/hooks.json`, lowercase events + `version: 1`), Hermes shell hooks (`~/.hermes/config.yaml`: `pre_llm_call` → `autogit busy`, `post_tool_call` → `autogit busy`, `post_llm_call` → `autogit ship`), and a Pi extension (`~/.pi/agent/extensions/autogit.ts`, fires on `agent_end`). All JSON configs merge through one helper; Claude/Codex share the same `Stop` entry shape.
 - Codex legacy `notify` is NOT used (single-slot, often taken by other tools; an upstream deprecation was attempted and reverted in 0.129). Codex hook commands run in the session `cwd`, unsandboxed, via `$SHELL -lc` — so `git push` has network and the user's PATH.
 - Codex surfaces (verified 2026-06-10): the desktop app and IDE extension run the same CLI core and execute the same `~/.codex/hooks.json`; cloud tasks never fire local hooks, and `codex exec` hook dispatch is broken upstream (openai/codex#26452). Trust is hash-based — any change to the wired commands silently un-trusts them until the user re-runs `/hooks`; editing hooks.json mid-session disables hooks until Codex restarts (#21160). Esc-interrupted turns fire no `Stop`; that turn's changes ship with the next one (busy-marker TTL self-heals).
-- `ship` reads an optional JSON payload from stdin (all hook systems pipe one): Cursor's carries `workspace_roots` (its hooks run from `~/.cursor`, not the project — multi-root workspaces ship every opted-in root) and `status` (`ship` only proceeds on `completed`, so aborted/errored turns never push). Claude/Codex payloads lack these fields and fall through to cwd behavior.
+- `ship` reads an optional JSON payload from stdin (all hook systems pipe one): Cursor's carries `workspace_roots` (its hooks run from `~/.cursor`, not the project — multi-root workspaces ship every opted-in root) and `status` (`ship` only proceeds on `completed`, so aborted/errored turns never push). Hermes payloads carry `cwd`, so gateway/CLI hooks can ship the repo that owns the turn. Claude/Codex payloads fall through to cwd behavior.
 
 ### How `ship` works
 
@@ -91,8 +92,8 @@ Escape hatch for bad auto-pushes; one commit per run, repeatable. Refuses unless
 
 - Problem: `git add -A` would scoop up a second agent's half-finished work when the first agent's turn ends.
 - Solution: while an agent is mid-turn it holds a marker file in `<git-dir>/autogit-busy/<session-id>`. `ship` clears its own marker, then defers (exit 0, stderr note) if any other fresh marker exists. The last agent to finish ships everything. No polling, no daemon.
-- Markers are written/refreshed by `autogit busy`, wired to: Claude `UserPromptSubmit` + `PostToolUse`, Codex `UserPromptSubmit` + `PostToolUse`, Cursor `beforeSubmitPrompt` + `postToolUse`, Pi `agent_start` + `tool_execution_end`. Tool hooks refresh the marker so long turns stay fresh.
-- Marker content doubles as prompt storage: prompt-submit hooks carry the user's prompt, so `busy` writes it into the marker; tool hooks carry none, so they only bump mtime (preserving the content). `ship` reads its own marker before clearing it and uses the prompt as the commit subject. Pi's hooks don't expose the prompt — Pi ships with the file-list fallback.
+- Markers are written/refreshed by `autogit busy`, wired to: Claude `UserPromptSubmit` + `PostToolUse`, Codex `UserPromptSubmit` + `PostToolUse`, Cursor `beforeSubmitPrompt` + `postToolUse`, Hermes `pre_llm_call` + `post_tool_call`, Pi `agent_start` + `tool_execution_end`. Tool hooks refresh the marker so long turns stay fresh.
+- Marker content doubles as prompt storage: prompt-submit hooks carry the user's prompt, so `busy` writes it into the marker; tool hooks carry none, so they only bump mtime (preserving the content). `ship` reads its own marker before clearing it and uses the prompt as the commit subject. Hermes exposes the prompt as `extra.user_message`; Pi's hooks don't expose the prompt, so Pi ships with the file-list fallback.
 - Stale markers (> 15 min, `BUSY_TTL_MS`) mean a crashed agent — they're deleted on sight, so shipping self-heals.
 - Markers live under the *resolved* git dir (`git rev-parse --git-dir`), so each worktree has its own set — parallel worktree agents never block each other.
 - `autogit busy` must stay silent on stdout (some hooks parse stdout). Session ids come from hook payloads (`session_id`/`conversation_id`/`thread_id`/`turn_id`) or `--id` (Pi). No id → no marker (an unattributable marker can never be cleared by its owner and would block shipping until stale).
@@ -111,7 +112,7 @@ Owner-gated — don't build these without a go-ahead.
 
 - **agent mode** — an LLM reviews the diff before push, for more serious repos. Owner decision 2026-06-09: the *currently-running* agent should review (it has task context), not a separate OpenRouter call. Mechanics TBD.
 - **human mode** — terminal y/n prompt on the diff, for production repos. (Existed in the pre-MVP prototype, cut for focus.)
-- More agents in `setup` (Pi added 2026-06-10; Hermes next: `post_llm_call` shell hook in `~/.hermes/config.yaml` + reading `cwd` from stdin JSON in `ship` + user consent flow).
+- More agents in `setup`.
 - Branch strategy: currently current-branch push only; auto-branch + PR flow considered.
 
 MIT

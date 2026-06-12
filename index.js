@@ -47,6 +47,7 @@ const SECRET_PATTERNS = [
   { name: "OpenAI key", re: /sk-[A-Za-z0-9_\-]{20,}/ },
   { name: "Anthropic key", re: /sk-ant-[A-Za-z0-9_\-]{20,}/ },
   { name: "GitHub token", re: /gh[pousr]_[A-Za-z0-9]{36,}/ },
+  { name: "GitHub fine-grained token", re: /github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}/ },
   { name: "Slack token", re: /xox[baprs]-[A-Za-z0-9\-]{10,}/ },
   { name: "Google API key", re: /AIza[0-9A-Za-z_\-]{35}/ },
   { name: "JWT", re: /eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}/ }
@@ -164,6 +165,34 @@ function setupCursor() {
   }) ?? `wired (${file})`;
 }
 
+function setupHermes() {
+  if (!existsSync(path.join(homedir(), ".hermes"))) return "not installed — skipped";
+  const file = path.join(homedir(), ".hermes", "config.yaml");
+  if (!existsSync(file)) return "config.yaml not found — skipped";
+
+  let text = readFileSync(file, "utf8");
+  if (text.includes("autogit ship") && text.includes("autogit busy")) return "already wired";
+
+  const hooks = `hooks:
+  pre_llm_call:
+    - command: "autogit busy"
+  post_tool_call:
+    - command: "autogit busy"
+  post_llm_call:
+    - command: "autogit ship"`;
+
+  if (/^hooks:\s*\{\}\s*$/m.test(text)) {
+    text = text.replace(/^hooks:\s*\{\}\s*$/m, hooks);
+  } else if (!/^hooks:/m.test(text)) {
+    text += `${text.endsWith("\n") ? "" : "\n"}${hooks}\n`;
+  } else {
+    return `hooks already configured in ${file} — add autogit busy/ship entries manually`;
+  }
+
+  writeFileSync(file, text);
+  return `wired (${file})`;
+}
+
 // Pi auto-discovers extensions in ~/.pi/agent/extensions/ — we drop one in.
 // Plain ESM, no types: valid for Pi's jiti loader, easy to verify with node.
 const PI_EXTENSION = `// autogit — auto stage→commit→push after every agent turn
@@ -205,6 +234,7 @@ function cmdSetup() {
   console.log(`Claude Code:  ${setupClaude()}`);
   console.log(`Codex:        ${setupCodex()}`);
   console.log(`Cursor:       ${setupCursor()}`);
+  console.log(`Hermes:       ${setupHermes()}`);
   console.log(`Pi:           ${setupPi()}`);
   console.log(`\nNow opt in the repos you want auto-pushed:\n  cd <repo> && autogit on`);
 }
@@ -397,7 +427,7 @@ function cmdBusy(args) {
   const id = sessionId(payload, args);
   if (!id) return; // no session id → no marker: nobody could ever clear it
   const prompt = promptText(payload);
-  const roots = payload?.workspace_roots?.length ? payload.workspace_roots : [process.cwd()];
+  const roots = payload?.workspace_roots?.length ? payload.workspace_roots : [payload?.cwd || process.cwd()];
   for (const dir of roots) {
     try {
       process.chdir(dir);
@@ -448,7 +478,13 @@ function autoMessage(stagedFiles) {
 // Pull the user's prompt out of a hook payload. Prompt-submit payloads vary
 // per agent — check the common spellings, both string and { text } shapes.
 function promptText(payload) {
-  for (const v of [payload?.prompt, payload?.text, payload?.user_prompt, payload?.message]) {
+  for (const v of [
+    payload?.prompt,
+    payload?.text,
+    payload?.user_prompt,
+    payload?.message,
+    payload?.extra?.user_message
+  ]) {
     if (typeof v === "string" && v.trim()) return v.trim();
     if (typeof v?.text === "string" && v.text.trim()) return v.text.trim();
   }
@@ -488,7 +524,7 @@ function subjectFrom(prompt) {
   return s.length > 72 ? s.slice(0, 69).trimEnd() + "..." : s;
 }
 
-// Hooks (Cursor, Claude, Codex) pass a JSON payload on stdin.
+// Hooks (Cursor, Claude, Codex, Hermes) pass a JSON payload on stdin.
 function readStdinPayload() {
   if (process.stdin.isTTY) return null;
   try {
@@ -501,8 +537,8 @@ function cmdShip(args) {
   const payload = readStdinPayload();
   // Cursor reports turn status — never ship aborted or errored turns
   if (payload?.status && payload.status !== "completed") process.exit(0);
-  // Cursor hooks run from ~/.cursor; the real project dirs come in the payload
-  const roots = payload?.workspace_roots?.length ? payload.workspace_roots : [process.cwd()];
+  // Cursor hooks include workspace_roots; Hermes shell hooks include cwd.
+  const roots = payload?.workspace_roots?.length ? payload.workspace_roots : [payload?.cwd || process.cwd()];
   const id = sessionId(payload, args);
   for (const dir of roots) shipRepo(dir, args, id, payload);
 }
@@ -640,8 +676,10 @@ function cmdStatus() {
   const codexWired = existsSync(codexFile) && readFileSync(codexFile, "utf8").includes("autogit ship");
   const cursorFile = path.join(homedir(), ".cursor", "hooks.json");
   const cursorWired = existsSync(cursorFile) && readFileSync(cursorFile, "utf8").includes("autogit ship");
+  const hermesFile = path.join(homedir(), ".hermes", "config.yaml");
+  const hermesWired = existsSync(hermesFile) && readFileSync(hermesFile, "utf8").includes("autogit ship");
   const piWired = existsSync(path.join(homedir(), ".pi", "agent", "extensions", "autogit.ts"));
-  console.log(`hooks:  Claude Code ${claudeWired ? "wired" : "NOT wired"} · Codex ${codexWired ? "wired" : "NOT wired"} · Cursor ${cursorWired ? "wired" : "NOT wired"} · Pi ${piWired ? "wired" : "NOT wired"}`);
+  console.log(`hooks:  Claude Code ${claudeWired ? "wired" : "NOT wired"} · Codex ${codexWired ? "wired" : "NOT wired"} · Cursor ${cursorWired ? "wired" : "NOT wired"} · Hermes ${hermesWired ? "wired" : "NOT wired"} · Pi ${piWired ? "wired" : "NOT wired"}`);
 
   const root = repoRootOrNull();
   if (!root) { console.log("repo:   not inside a git repository"); return; }
@@ -672,7 +710,7 @@ switch (cmd) {
   default:
     console.log(`autogit — auto stage→commit→push for agentic engineers
 
-  autogit setup     Wire up agent hooks: Claude Code + Codex + Cursor + Pi (once per machine)
+  autogit setup     Wire up agent hooks: Claude Code + Codex + Cursor + Hermes + Pi (once per machine)
   autogit on        Enable auto-push in this repo
   autogit off       Disable auto-push in this repo
   autogit ship      Stage, scan, commit, push (hooks run this after every turn)
