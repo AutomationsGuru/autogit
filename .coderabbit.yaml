@@ -1,0 +1,4 @@
+remote_config:
+  repository: "AutomationsGuru/agent-os"
+  ref: "main"
+  path: "docs/github-tooling/coderabbit/shared-config.yaml"
