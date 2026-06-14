@@ -16,15 +16,18 @@ jobs:
     steps:
       - id: metadata
         uses: dependabot/fetch-metadata@d7267f607e9d3fb96fc2fbe83e0af444713e90b7 # v2.3.0
-        with:
-          github-token: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Label production dependency updates
         if: steps.metadata.outputs.dependency-type == 'direct:production'
-        run: gh pr edit "$PR_URL" --add-label "production-dependency"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ['production-dependency'],
+            });
 
       # Set DEPENDABOT_AUTOMERGE_ENABLED=true only after branch protection and required checks are verified.
       - name: Enable auto-merge for low-risk updates
@@ -35,7 +38,20 @@ jobs:
             steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
             steps.metadata.outputs.update-type == 'version-update:semver-minor'
           )
-        run: gh pr merge --auto --squash "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            await github.graphql(`
+              mutation($pullRequestId: ID!) {
+                enablePullRequestAutoMerge(input: {
+                  pullRequestId: $pullRequestId,
+                  mergeMethod: SQUASH
+                }) {
+                  pullRequest {
+                    number
+                  }
+                }
+              }
+            `, {
+              pullRequestId: context.payload.pull_request.node_id,
+            });
