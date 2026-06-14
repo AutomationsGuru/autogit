@@ -58,6 +58,7 @@ autogit --version Print the installed version (-v)
 - **One-command undo** — `autogit undo` takes back the last auto-push, remote included.
 - **Secrets scan** — blocks pushes containing API keys, private key blocks, `.env` files, or JWTs, and unstages everything. Override with `--force-secrets`. Commit messages are covered too: a prompt containing a secret never becomes the subject (not overridable).
 - **No noise** — nothing changed means nothing shipped. Aborted or errored Cursor turns never ship.
+- **Remote-moved aware** — if something else pushed first (another machine, the GitHub web editor), `ship` rebases your commit onto the new remote tip and retries. Real conflicts stop safely: commit kept locally, fix spelled out.
 - **Parallel-agent aware** — if another agent is still mid-task in the same repo, autogit waits its turn: the last agent to finish ships everything. (For fully separate commits per agent, use worktrees — autogit handles each independently.)
 
 ## Internals
@@ -81,6 +82,8 @@ For contributors, human or AI. The implementation is a reference of product inte
 ### How `ship` works
 
 `git add -A` → secrets scan on added lines (AWS/OpenAI/Anthropic/GitHub/Slack/Google keys, private key blocks, `.env` filenames, JWTs; `--force-secrets` overrides) → commit → push to `origin`/current branch.
+
+Non-fast-forward rejection (remote moved — a push from elsewhere) self-heals: fetch, `git rebase FETCH_HEAD`, push again once. The tree is always clean at that point (everything was just committed) so the rebase is safe, and the `Shipped-by` trailer survives it, so `undo` keeps working. A rebase conflict aborts cleanly: commit kept locally, manual fix printed (`git pull --rebase && git push`). Any other push failure still dies with the commit kept locally.
 
 Commit subject precedence: `-m` flag > the turn's user prompt > the agent's final message (Codex `last_assistant_message`) > file-list fallback (`autogit: update X, Y (+N more)`). Prompt-derived subjects are first checked against `SECRET_PATTERNS` (full text, pre-truncation — the diff scan never sees the message): a match drops to the file-list fallback, with a stderr note. `--force-secrets` deliberately does not override this. The prompt comes from the session's busy-marker content (see below), or a `prompt`-like field in the stop payload, or the last real user message in the `transcript_path` JSONL — both Claude transcript and Codex rollout line shapes are parsed (formats are officially unstable, so parsing is defensive; tool results and `<`-prefixed noise like `<user_instructions>` are skipped). Subjects are flattened to one line, capped at 72 chars. Every commit gets a `Shipped-by: autogit` trailer — that's how `undo` identifies autogit commits.
 
