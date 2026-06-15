@@ -6,7 +6,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "tuesday"
-      time: "08:30"
+      time: "08:00"
       timezone: "America/Edmonton"
     labels:
       - "dependencies"
@@ -26,7 +26,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "tuesday"
-      time: "08:30"
+      time: "08:00"
       timezone: "America/Edmonton"
     labels:
       - "dependencies"
