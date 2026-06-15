@@ -11,8 +11,10 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, readdir
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 
 const CONFIG_FILE = ".autogit.json";
+ensureWindowsToolPath();
 // Version comes from package.json — single source of truth.
 const VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 // Defaults mirror the MVP's current auto-push behavior.
@@ -22,6 +24,28 @@ const SHIP_TRAILER = "Shipped-by: autogit";
 
 // ---------- helpers ----------
 // Helpers wrap git/fs calls so commands above stay readable.
+
+function ensureWindowsToolPath() {
+  if (process.platform !== "win32") return;
+  const key = Object.keys(process.env).find(name => name.toLowerCase() === "path") || "PATH";
+  const existing = (process.env[key] || "").split(path.delimiter).filter(Boolean);
+  const seen = new Set(existing.map(entry => entry.toLowerCase()));
+  const appData = process.env.APPDATA || path.join(homedir(), "AppData", "Roaming");
+  const candidates = [
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Git", "cmd"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Git", "usr", "bin"),
+    path.dirname(process.execPath),
+    path.join(appData, "npm"),
+    path.join(homedir(), ".pi", "agent", "bin")
+  ];
+  for (const entry of candidates) {
+    if (!existsSync(entry) || seen.has(entry.toLowerCase())) continue;
+    existing.unshift(entry);
+    seen.add(entry.toLowerCase());
+  }
+  process.env[key] = existing.join(path.delimiter);
+  process.env.PATH = process.env[key];
+}
 
 function git(...args) {
   const r = spawnSync("git", args, { encoding: "utf8" });
@@ -35,6 +59,68 @@ function ok(msg) { console.error(`✓ autogit: ${msg}`); }
 function repoRootOrNull() {
   const r = git("rev-parse", "--show-toplevel");
   return r.ok ? r.out : null;
+}
+
+function commandPath(value) {
+  return value.replace(/\\/g, "/");
+}
+
+function quoteCommandArg(value) {
+  return `"${commandPath(value).replace(/"/g, '\\"')}"`;
+}
+
+function autogitCommand() {
+  return `${quoteCommandArg(process.execPath)} ${quoteCommandArg(fileURLToPath(import.meta.url))}`;
+}
+
+function rewriteAutogitCommandText(value) {
+  return value
+    .replace(/"[^"]*node(?:\.exe)?"\s+"[^"]*autogit[^"]*index\.js"\s+(ship|busy)\b/g, (_match, subcommand) => `${autogitCommand()} ${subcommand}`)
+    .replace(/(^|[;&|]\s*)autogit\s+(ship|busy)\b/g, (_match, prefix, subcommand) => `${prefix}${autogitCommand()} ${subcommand}`);
+}
+
+function rewriteAutogitCommands(value) {
+  if (typeof value === "string") return rewriteAutogitCommandText(value);
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) value[i] = rewriteAutogitCommands(value[i]);
+    return value;
+  }
+  if (value && typeof value === "object") {
+    for (const key of Object.keys(value)) value[key] = rewriteAutogitCommands(value[key]);
+  }
+  return value;
+}
+
+function commandFingerprint(entry) {
+  if (entry && typeof entry === "object") {
+    if (typeof entry.command === "string") return entry.command;
+    if (Array.isArray(entry.hooks)) return entry.hooks.map(commandFingerprint).join("\n");
+  }
+  return JSON.stringify(entry);
+}
+
+function dedupeHookEntries(cfg) {
+  if (!cfg.hooks || typeof cfg.hooks !== "object") return;
+  for (const event of Object.keys(cfg.hooks)) {
+    if (!Array.isArray(cfg.hooks[event])) continue;
+    const seen = new Set();
+    cfg.hooks[event] = cfg.hooks[event].filter(entry => {
+      const fingerprint = commandFingerprint(entry);
+      if (seen.has(fingerprint)) return false;
+      seen.add(fingerprint);
+      return true;
+    });
+  }
+}
+
+function hasAutogitSubcommand(file, subcommand) {
+  if (!existsSync(file)) return false;
+  const text = readFileSync(file, "utf8");
+  return (
+    text.includes(`${autogitCommand()} ${subcommand}`) ||
+    new RegExp(`autogit[^\\n\\r]*index\\.js(?:\\\\)?\"?\\s+${subcommand}\\b`).test(text) ||
+    new RegExp(`\\bautogit\\s+${subcommand}\\b`).test(text)
+  );
 }
 
 // ---------- secrets scanning ----------
@@ -94,7 +180,10 @@ function updateJson(file, mutate) {
     catch { return `could not parse ${file} — skipped, fix it and rerun`; }
   }
   const before = JSON.stringify(cfg);
+  rewriteAutogitCommands(cfg);
   mutate(cfg);
+  rewriteAutogitCommands(cfg);
+  dedupeHookEntries(cfg);
   if (JSON.stringify(cfg) === before) return "already wired";
   writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
   return null; // changed — caller crafts the message
@@ -117,11 +206,11 @@ function setupClaude() {
   if (!existsSync(path.join(homedir(), ".claude"))) return "not installed — skipped";
   const file = path.join(homedir(), ".claude", "settings.json");
   // cd to the project dir: Claude hooks don't guarantee the working directory
-  const ship = 'cd "${CLAUDE_PROJECT_DIR:-.}" && autogit ship';
-  const busy = 'cd "${CLAUDE_PROJECT_DIR:-.}" && autogit busy';
+  const ship = `cd "\${CLAUDE_PROJECT_DIR:-.}" && ${autogitCommand()} ship`;
+  const busy = `cd "\${CLAUDE_PROJECT_DIR:-.}" && ${autogitCommand()} busy`;
   return updateJson(file, cfg => {
-    ensure(cfg, "autogit ship", c => claudeStyleEntry(c, "Stop", ship));
-    ensure(cfg, "autogit busy", c => {
+    ensure(cfg, ship, c => claudeStyleEntry(c, "Stop", ship));
+    ensure(cfg, busy, c => {
       claudeStyleEntry(c, "UserPromptSubmit", busy);
       claudeStyleEntry(c, "PostToolUse", busy); // refreshes the marker during long turns
     });
@@ -133,11 +222,13 @@ function setupCodex() {
   // Codex ≥0.124 lifecycle hooks; runs commands in the session cwd.
   // Separate file, so the user's config.toml (incl. legacy notify) stays untouched.
   const file = path.join(homedir(), ".codex", "hooks.json");
+  const ship = `${autogitCommand()} ship`;
+  const busy = `${autogitCommand()} busy`;
   return updateJson(file, cfg => {
-    ensure(cfg, "autogit ship", c => claudeStyleEntry(c, "Stop", "autogit ship"));
-    ensure(cfg, "autogit busy", c => {
-      claudeStyleEntry(c, "UserPromptSubmit", "autogit busy");
-      claudeStyleEntry(c, "PostToolUse", "autogit busy");
+    ensure(cfg, ship, c => claudeStyleEntry(c, "Stop", ship));
+    ensure(cfg, busy, c => {
+      claudeStyleEntry(c, "UserPromptSubmit", busy);
+      claudeStyleEntry(c, "PostToolUse", busy);
     });
   // Codex trust is hash-based: it silently skips hooks until the user trusts
   // them via /hooks, and re-flags them whenever this file's entries change.
@@ -150,6 +241,8 @@ function setupCursor() {
   // Cursor stop hooks run from ~/.cursor and pass workspace_roots via stdin JSON.
   // Local + worktree agents fire it; cloud agents don't support stop hooks yet.
   const file = path.join(homedir(), ".cursor", "hooks.json");
+  const ship = `${autogitCommand()} ship`;
+  const busy = `${autogitCommand()} busy`;
   const entry = (cfg, event, command) => {
     cfg.hooks ??= {};
     cfg.hooks[event] ??= [];
@@ -157,10 +250,10 @@ function setupCursor() {
   };
   return updateJson(file, cfg => {
     cfg.version ??= 1;
-    ensure(cfg, "autogit ship", c => entry(c, "stop", "autogit ship"));
-    ensure(cfg, "autogit busy", c => {
-      entry(c, "beforeSubmitPrompt", "autogit busy");
-      entry(c, "postToolUse", "autogit busy");
+    ensure(cfg, ship, c => entry(c, "stop", ship));
+    ensure(cfg, busy, c => {
+      entry(c, "beforeSubmitPrompt", busy);
+      entry(c, "postToolUse", busy);
     });
   }) ?? `wired (${file})`;
 }
@@ -171,15 +264,22 @@ function setupHermes() {
   if (!existsSync(file)) return "config.yaml not found — skipped";
 
   let text = readFileSync(file, "utf8");
-  if (text.includes("autogit ship") && text.includes("autogit busy")) return "already wired";
+  const ship = `${autogitCommand()} ship`;
+  const busy = `${autogitCommand()} busy`;
+  const rewritten = rewriteAutogitCommandText(text);
+  if (rewritten !== text) {
+    writeFileSync(file, rewritten);
+    return `rewired (${file})`;
+  }
+  if (text.includes(ship) && text.includes(busy)) return "already wired";
 
   const hooks = `hooks:
   pre_llm_call:
-    - command: "autogit busy"
+    - command: '${busy.replace(/'/g, "''")}'
   post_tool_call:
-    - command: "autogit busy"
+    - command: '${busy.replace(/'/g, "''")}'
   post_llm_call:
-    - command: "autogit ship"`;
+    - command: '${ship.replace(/'/g, "''")}'`;
 
   if (/^hooks:\s*\{\}\s*$/m.test(text)) {
     text = text.replace(/^hooks:\s*\{\}\s*$/m, hooks);
@@ -199,22 +299,29 @@ const PI_EXTENSION = `// autogit — auto stage→commit→push after every agen
 // Generated by \`autogit setup\`. Delete this file to unwire Pi.
 import { spawn } from "node:child_process";
 
+const AUTOGIT_NODE = ${JSON.stringify(commandPath(process.execPath))};
+const AUTOGIT_SCRIPT = ${JSON.stringify(commandPath(fileURLToPath(import.meta.url)))};
+
+function spawnAutogit(args, options) {
+  return spawn(AUTOGIT_NODE, [AUTOGIT_SCRIPT, ...args], options);
+}
+
 export default function (pi) {
   const id = "pi-" + process.pid;
   const busy = (ctx) => {
-    spawn("autogit", ["busy", "--id", id], { cwd: ctx.cwd, stdio: "ignore" }).on("error", () => {});
+    spawnAutogit(["busy", "--id", id], { cwd: ctx.cwd, stdio: "ignore" }).on("error", () => {});
   };
   pi.on("agent_start", (_event, ctx) => busy(ctx));
   pi.on("tool_execution_end", (_event, ctx) => busy(ctx)); // refresh during long turns
 
   pi.on("agent_end", (_event, ctx) => {
-    const p = spawn("autogit", ["ship", "--id", id], { cwd: ctx.cwd, stdio: ["ignore", "ignore", "pipe"] });
+    const p = spawnAutogit(["ship", "--id", id], { cwd: ctx.cwd, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     p.stderr.on("data", (d) => { err += d; });
     p.on("close", (code) => {
       if (code !== 0) ctx.ui.notify("autogit: " + (err.trim() || "ship failed"), "error");
     });
-    p.on("error", () => ctx.ui.notify("autogit: not found on PATH", "error"));
+    p.on("error", (error) => ctx.ui.notify("autogit: " + (error.message || "ship failed"), "error"));
   });
 }
 `;
@@ -685,13 +792,13 @@ function cmdUndo() {
 function cmdStatus() {
   console.log(`autogit ${VERSION}`);
   const claudeFile = path.join(homedir(), ".claude", "settings.json");
-  const claudeWired = existsSync(claudeFile) && readFileSync(claudeFile, "utf8").includes("autogit ship");
+  const claudeWired = hasAutogitSubcommand(claudeFile, "ship");
   const codexFile = path.join(homedir(), ".codex", "hooks.json");
-  const codexWired = existsSync(codexFile) && readFileSync(codexFile, "utf8").includes("autogit ship");
+  const codexWired = hasAutogitSubcommand(codexFile, "ship");
   const cursorFile = path.join(homedir(), ".cursor", "hooks.json");
-  const cursorWired = existsSync(cursorFile) && readFileSync(cursorFile, "utf8").includes("autogit ship");
+  const cursorWired = hasAutogitSubcommand(cursorFile, "ship");
   const hermesFile = path.join(homedir(), ".hermes", "config.yaml");
-  const hermesWired = existsSync(hermesFile) && readFileSync(hermesFile, "utf8").includes("autogit ship");
+  const hermesWired = hasAutogitSubcommand(hermesFile, "ship");
   const piWired = existsSync(path.join(homedir(), ".pi", "agent", "extensions", "autogit.ts"));
   console.log(`hooks:  Claude Code ${claudeWired ? "wired" : "NOT wired"} · Codex ${codexWired ? "wired" : "NOT wired"} · Cursor ${cursorWired ? "wired" : "NOT wired"} · Hermes ${hermesWired ? "wired" : "NOT wired"} · Pi ${piWired ? "wired" : "NOT wired"}`);
 
